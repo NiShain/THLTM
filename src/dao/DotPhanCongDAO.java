@@ -40,6 +40,20 @@ public class DotPhanCongDAO {
     }
 
     /**
+     * Lấy đợt phân công DONE gần nhất (theo created_at). Trả về null nếu không có.
+     */
+    public DotPhanCong findLastDoneDot() throws SQLException {
+        String sql = "SELECT * FROM dot_phan_cong WHERE trang_thai = 'DONE' ORDER BY created_at DESC LIMIT 1";
+        try (Connection conn = DatabaseUtil.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return mapRow(rs);
+            }
+        }
+        return null;
+    }
+
+    /**
      * Cập nhật trạng thái đợt phân công.
      */
     public void updateTrangThai(long dotId, String trangThai) throws SQLException {

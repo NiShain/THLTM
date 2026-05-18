@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.net.SocketTimeoutException;
 
 /**
  * Server phân công cán bộ coi thi.
@@ -358,11 +359,27 @@ public class PhanCongServer extends JFrame {
      * 4. Gửi file Excel: writeInt(len) + write(data) x2
      */
     private void handleClient(Socket client, String addr) {
+        try {
+            client.setSoTimeout(NetworkConfig.READ_TIMEOUT); // dùng cấu hình chung
+        } catch (Exception e) {
+            // ignore
+        }
+
         try (DataInputStream dis = new DataInputStream(new BufferedInputStream(client.getInputStream()));
                 DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(client.getOutputStream()))) {
 
             // 1. Đọc int đầu tiên để detect protocol
-            int firstInt = dis.readInt();
+            int firstInt;
+            try {
+                firstInt = dis.readInt();
+            } catch (SocketTimeoutException ste) {
+                log("Lỗi: Read timed out từ client " + addr + " (chờ dữ liệu vượt quá " + NetworkConfig.READ_TIMEOUT + "ms)");
+                try {
+                    sendErrorResponse(dos, "Read timed out waiting for client data", false);
+                } catch (Exception ignored) {
+                }
+                return;
+            }
             requestCount++;
             updateStats();
 
@@ -511,9 +528,8 @@ public class PhanCongServer extends JFrame {
         int len = dis.readInt();
         if (len <= 0)
             return "";
-        if (len > 10_000_000) {
-            log("  CẢNH BÁO: String length quá lớn (" + len + "), có thể lệch protocol!");
-            return "";
+        if (len > 50_000) {
+            throw new IOException("String length quá lớn (" + len + "), có thể lệch protocol!");
         }
         byte[] bytes = new byte[len];
         dis.readFully(bytes);

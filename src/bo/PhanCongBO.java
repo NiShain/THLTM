@@ -25,6 +25,19 @@ public class PhanCongBO {
     private final DotPhanCongDAO dotDAO = new DotPhanCongDAO();
     private final PhongThiPhanCongDAO phongPCDAO = new PhongThiPhanCongDAO();
     private final PhanCongChiTietDAO chiTietDAO = new PhanCongChiTietDAO();
+    private final dao.LichSuCapPhongDAO lichSuCapPhongDAO = new dao.LichSuCapPhongDAO();
+    private final dao.LichSuPhongThiDAO lichSuPhongThiDAO = new dao.LichSuPhongThiDAO();
+    private final dao.LichSuGiamSatDAO lichSuGiamSatDAO = new dao.LichSuGiamSatDAO();
+
+    // --- Helper: lịch sử phân công lần trước ---
+    private static class PrevHistory {
+        // unordered pair key "A#B"
+        Set<String> paired = new HashSet<>();
+        // maGV -> set of phòng đã từng phân công
+        Map<String, Set<String>> prevRooms = new HashMap<>();
+        // những maGV đã từng làm giám sát hành lang
+        Set<String> prevGiamSat = new HashSet<>();
+    }
 
     /**
      * Xử lý phân công từ JSON request (Map).
@@ -94,12 +107,12 @@ public class PhanCongBO {
             for (int i = 0; i < canBoRaw.size(); i++) {
                 Map<String, Object> cb = canBoRaw.get(i);
                 String maGV = JsonHelper.getString(cb, "maGV", "").trim();
-                
+
                 // Xóa trùng lặp hoặc mã rỗng
                 if (maGV.isEmpty() || !seenMaGV.add(maGV)) {
-                    continue; 
+                    continue;
                 }
-                
+
                 CanBoCoiThi canBo = new CanBoCoiThi();
                 canBo.setMaGV(maGV);
                 canBo.setHoTen(JsonHelper.getString(cb, "hoTen", ""));
@@ -109,7 +122,7 @@ public class PhanCongBO {
             }
 
             if (danhSachCanBo.size() < m) {
-                return errorResult("Dữ liệu cán bộ hợp lệ/không trùng lặp chỉ có " 
+                return errorResult("Dữ liệu cán bộ hợp lệ/không trùng lặp chỉ có "
                         + danhSachCanBo.size() + " người, không đủ " + m + " người theo yêu cầu.");
             }
 
@@ -122,79 +135,290 @@ public class PhanCongBO {
                 danhSachPhong.add(pt);
             }
 
-            // ====== BƯỚC 4: SHUFFLE & PHÂN CÔNG ======
-            System.out.println("[BO] Shuffle danh sách cán bộ...");
-            List<CanBoCoiThi> pool = new ArrayList<>(danhSachCanBo);
-            Collections.shuffle(pool, new Random());
-
-            List<CanBoCoiThi> canBoDuocChon = new ArrayList<>(pool.subList(0, m));
-            List<CanBoCoiThi> giamThiList = canBoDuocChon.subList(0, soGiamThiCanThiet);
-            List<CanBoCoiThi> giamSatList = canBoDuocChon.subList(soGiamThiCanThiet, m);
-            System.out.println("[BO] Giám thị: " + giamThiList.size() + ", Giám sát: " + giamSatList.size());
-
+            // Danh sách tên phòng (dùng nhiều chỗ) - khai báo sớm để có scope rộng
             List<String> tenPhongList = new ArrayList<>();
-            for (int i = 0; i < n; i++)
-                tenPhongList.add(phongThiRaw.get(i));
+            for (int i = 0; i < n; i++) tenPhongList.add(phongThiRaw.get(i));
 
-            // ====== BƯỚC 5: GÁN GIÁM THỊ ======
-            List<PhanCongChiTiet> allChiTiet = new ArrayList<>();
-            for (int i = 0; i < n; i++) {
-                CanBoCoiThi gt1 = giamThiList.get(2 * i);
-                PhanCongChiTiet pc1 = new PhanCongChiTiet();
-                pc1.setRole(PhanCongChiTiet.ROLE_GIAMTHI1);
-                pc1.setViTriTrongPhong(1);
-                pc1.setMaGV(gt1.getMaGV());
-                pc1.setHoTen(gt1.getHoTen());
-                pc1.setTenPhong(tenPhongList.get(i));
-                allChiTiet.add(pc1);
+            // ====== BƯỚC 4: SHUFFLE & PHÂN CÔNG ======
+            System.out.println("[BO] Shuffle danh sách cán bộ (history-aware)...");
 
-                CanBoCoiThi gt2 = giamThiList.get(2 * i + 1);
-                PhanCongChiTiet pc2 = new PhanCongChiTiet();
-                pc2.setRole(PhanCongChiTiet.ROLE_GIAMTHI2);
-                pc2.setViTriTrongPhong(2);
-                pc2.setMaGV(gt2.getMaGV());
-                pc2.setHoTen(gt2.getHoTen());
-                pc2.setTenPhong(tenPhongList.get(i));
-                allChiTiet.add(pc2);
+            // Nạp lịch sử phân công gần nhất (nếu có)
+            PrevHistory history = null;
+            try {
+                var lastDot = dotDAO.findLastDoneDot();
+                if (lastDot != null) {
+                    history = loadPrevHistory(lastDot.getId());
+                }
+            } catch (Exception e) {
+                // nếu lỗi DB, tiếp tục với history = null (fallback)
+                System.err.println("[BO] Cảnh báo: không thể nạp lịch sử: " + e.getMessage());
             }
 
-            // ====== BƯỚC 6: GÁN GIÁM SÁT HÀNH LANG ======
-            List<PhanCongChiTiet> giamSatChiTiet = new ArrayList<>();
-            if (!giamSatList.isEmpty()) {
-                int soGiamSat = giamSatList.size();
-                int phongMoiGS = n / soGiamSat;
-                int phongDu = n % soGiamSat;
-                int phongIdx = 0;
+            List<CanBoCoiThi> pool = new ArrayList<>(danhSachCanBo);
 
-                for (int g = 0; g < soGiamSat; g++) {
-                    CanBoCoiThi gs = giamSatList.get(g);
-                    int soPhongChoGS = phongMoiGS + (g < phongDu ? 1 : 0);
+            // Kết quả phân công cuối cùng (dùng chung cho cả nhánh)
+            List<PhanCongChiTiet> finalAllChiTiet = null;
+            List<PhanCongChiTiet> finalGiamSatChiTiet = null;
 
-                    int fromPhong = Math.min(phongIdx, n - 1);
-                    int toPhong;
-                    if (soPhongChoGS <= 0) {
-                        toPhong = n - 1;
-                        fromPhong = n - 1;
+            // Nếu không có lịch sử, giữ hành vi cũ (đơn giản)
+            if (history == null) {
+                Collections.shuffle(pool, new Random());
+                List<CanBoCoiThi> canBoDuocChon = new ArrayList<>(pool.subList(0, m));
+                List<CanBoCoiThi> giamThiList = canBoDuocChon.subList(0, soGiamThiCanThiet);
+                List<CanBoCoiThi> giamSatList = canBoDuocChon.subList(soGiamThiCanThiet, m);
+                System.out.println("[BO] Giám thị: " + giamThiList.size() + ", Giám sát: " + giamSatList.size());
+
+                // tạo danh sách phân công như cũ
+                List<PhanCongChiTiet> allChiTiet = new ArrayList<>();
+                for (int i = 0; i < n; i++) {
+                    CanBoCoiThi gt1 = giamThiList.get(2 * i);
+                    PhanCongChiTiet pc1 = new PhanCongChiTiet();
+                    pc1.setRole(PhanCongChiTiet.ROLE_GIAMTHI1);
+                    pc1.setViTriTrongPhong(1);
+                    pc1.setMaGV(gt1.getMaGV());
+                    pc1.setHoTen(gt1.getHoTen());
+                    pc1.setTenPhong(phongThiRaw.get(i));
+                    allChiTiet.add(pc1);
+
+                    CanBoCoiThi gt2 = giamThiList.get(2 * i + 1);
+                    PhanCongChiTiet pc2 = new PhanCongChiTiet();
+                    pc2.setRole(PhanCongChiTiet.ROLE_GIAMTHI2);
+                    pc2.setViTriTrongPhong(2);
+                    pc2.setMaGV(gt2.getMaGV());
+                    pc2.setHoTen(gt2.getHoTen());
+                    pc2.setTenPhong(phongThiRaw.get(i));
+                    allChiTiet.add(pc2);
+                }
+                // gán giám sát: phân phối đều, nếu số giám sát > số phòng thì quay vòng (round-robin)
+                List<PhanCongChiTiet> giamSatChiTiet = new ArrayList<>();
+                if (!giamSatList.isEmpty()) {
+                    int soGiamSat = giamSatList.size();
+                    if (soGiamSat <= n) {
+                        // phân bổ dạng block như trước (mỗi giám sát có một hoặc nhiều phòng)
+                        int phongMoiGS = n / soGiamSat;
+                        int phongDu = n % soGiamSat;
+                        int phongIdx = 0;
+                        for (int g = 0; g < soGiamSat; g++) {
+                            CanBoCoiThi gs = giamSatList.get(g);
+                            int soPhongChoGS = phongMoiGS + (g < phongDu ? 1 : 0);
+                            int fromPhong = Math.min(phongIdx, n - 1);
+                            int toPhong;
+                            if (soPhongChoGS <= 0) {
+                                toPhong = n - 1;
+                                fromPhong = n - 1;
+                            } else {
+                                toPhong = Math.min(phongIdx + soPhongChoGS - 1, n - 1);
+                            }
+                            String rangeText = (fromPhong == toPhong)
+                                    ? phongThiRaw.get(fromPhong)
+                                    : "Từ " + phongThiRaw.get(fromPhong) + " đến " + phongThiRaw.get(toPhong);
+                            PhanCongChiTiet pcgs = new PhanCongChiTiet();
+                            pcgs.setRole(PhanCongChiTiet.ROLE_GIAMSAT);
+                            pcgs.setViTriTrongPhong(3 + g);
+                            pcgs.setRangeText(rangeText);
+                            pcgs.setMaGV(gs.getMaGV());
+                            pcgs.setHoTen(gs.getHoTen());
+                            pcgs.setTenPhong(phongThiRaw.get(fromPhong));
+                            giamSatChiTiet.add(pcgs);
+                            phongIdx = toPhong + 1;
+                        }
                     } else {
-                        toPhong = Math.min(phongIdx + soPhongChoGS - 1, n - 1);
+                        // quá nhiều giám sát so với phòng -> gán round-robin: mỗi giám sát 1 phòng theo (index % n)
+                        for (int g = 0; g < soGiamSat; g++) {
+                            CanBoCoiThi gs = giamSatList.get(g);
+                            int roomIdx = g % n;
+                            String roomName = phongThiRaw.get(roomIdx);
+                            PhanCongChiTiet pcgs = new PhanCongChiTiet();
+                            pcgs.setRole(PhanCongChiTiet.ROLE_GIAMSAT);
+                            pcgs.setViTriTrongPhong(3 + g);
+                            pcgs.setRangeText(roomName);
+                            pcgs.setMaGV(gs.getMaGV());
+                            pcgs.setHoTen(gs.getHoTen());
+                            pcgs.setTenPhong(roomName);
+                            giamSatChiTiet.add(pcgs);
+                        }
+                    }
+                }
+                finalAllChiTiet = allChiTiet;
+                finalGiamSatChiTiet = giamSatChiTiet;
+            } else {
+                // Có lịch sử -> thử phân công thỏa ràng buộc
+                boolean ok = false;
+                List<PhanCongChiTiet> assignedGiamThi = null;
+                List<PhanCongChiTiet> assignedGiamSat = null;
+                int maxAttempts = 500;
+                for (int attempt = 0; attempt < maxAttempts && !ok; attempt++) {
+                    Collections.shuffle(pool, new Random());
+                    List<CanBoCoiThi> candidates = new ArrayList<>(pool);
+
+                    List<CanBoCoiThi> selectedGiamThi = new ArrayList<>();
+                    boolean fail = false;
+
+                    for (int i = 0; i < n; i++) {
+                        String room = phongThiRaw.get(i);
+                        // tìm người A
+                        int idxA = -1;
+                        for (int j = 0; j < candidates.size(); j++) {
+                            String ma = candidates.get(j).getMaGV();
+                            Set<String> prev = history.prevRooms.get(ma);
+                            if (prev != null && prev.contains(room)) continue;
+                            idxA = j; break;
+                        }
+                        if (idxA == -1) { fail = true; break; }
+                        CanBoCoiThi a = candidates.remove(idxA);
+
+                        // tìm người B
+                        int idxB = -1;
+                        for (int j = 0; j < candidates.size(); j++) {
+                            String maB = candidates.get(j).getMaGV();
+                            Set<String> prevB = history.prevRooms.get(maB);
+                            if (prevB != null && prevB.contains(room)) continue;
+                            // không cặp với a trước đó
+                            String pairKey = makePairKey(a.getMaGV(), maB);
+                            if (history.paired.contains(pairKey)) continue;
+                            idxB = j; break;
+                        }
+                        if (idxB == -1) { fail = true; break; }
+                        CanBoCoiThi b = candidates.remove(idxB);
+
+                        selectedGiamThi.add(a);
+                        selectedGiamThi.add(b);
                     }
 
-                    String rangeText = (fromPhong == toPhong)
-                            ? tenPhongList.get(fromPhong)
-                            : "Từ " + tenPhongList.get(fromPhong) + " đến " + tenPhongList.get(toPhong);
+                    if (fail || selectedGiamThi.size() < 2 * n) continue;
 
-                    PhanCongChiTiet pcgs = new PhanCongChiTiet();
-                    pcgs.setRole(PhanCongChiTiet.ROLE_GIAMSAT);
-                    pcgs.setViTriTrongPhong(3 + g);
-                    pcgs.setRangeText(rangeText);
-                    pcgs.setMaGV(gs.getMaGV());
-                    pcgs.setHoTen(gs.getHoTen());
-                    pcgs.setTenPhong(tenPhongList.get(fromPhong));
-                    giamSatChiTiet.add(pcgs);
+                    // bây giờ chọn giám sát từ phần còn lại
+                    int needGiamSat = m - 2 * n;
+                    List<CanBoCoiThi> remaining = new ArrayList<>(candidates);
+                    List<CanBoCoiThi> selectedGiamSat = new ArrayList<>();
 
-                    phongIdx = toPhong + 1;
+                    if (needGiamSat > remaining.size()) continue;
+
+                    // phân bổ phòng cho giám sát tương tự như cũ: tính phạm vi
+                    int phongMoiGS = n / Math.max(1, needGiamSat);
+                    int phongDu = n % Math.max(1, needGiamSat);
+                    int phongIdx = 0;
+                    boolean failGS = false;
+
+                    for (int g = 0; g < needGiamSat; g++) {
+                        String roomStart = phongThiRaw.get(Math.min(phongIdx, n - 1));
+                        // chọn 1 người cho giám sát g, người này không được là prevGiamSat và không được từng ở roomStart
+                        int pickIdx = -1;
+                        for (int j = 0; j < remaining.size(); j++) {
+                            String ma = remaining.get(j).getMaGV();
+                            if (history.prevGiamSat.contains(ma)) continue;
+                            Set<String> prev = history.prevRooms.get(ma);
+                            if (prev != null && prev.contains(roomStart)) continue;
+                            pickIdx = j; break;
+                        }
+                        if (pickIdx == -1) { failGS = true; break; }
+                        selectedGiamSat.add(remaining.remove(pickIdx));
+
+                        int soPhongChoGS = phongMoiGS + (g < phongDu ? 1 : 0);
+                        int toPhong;
+                        if (soPhongChoGS <= 0) {
+                            toPhong = n - 1;
+                            phongIdx = n - 1;
+                        } else {
+                            toPhong = Math.min(phongIdx + soPhongChoGS - 1, n - 1);
+                        }
+                        phongIdx = toPhong + 1;
+                    }
+
+                    if (failGS) continue;
+
+                    // Tạo PhanCongChiTiet từ selectedGiamThi và selectedGiamSat
+                    List<PhanCongChiTiet> allGT = new ArrayList<>();
+                    for (int i = 0; i < n; i++) {
+                        CanBoCoiThi gt1 = selectedGiamThi.get(2 * i);
+                        PhanCongChiTiet pc1 = new PhanCongChiTiet();
+                        pc1.setRole(PhanCongChiTiet.ROLE_GIAMTHI1);
+                        pc1.setViTriTrongPhong(1);
+                        pc1.setMaGV(gt1.getMaGV());
+                        pc1.setHoTen(gt1.getHoTen());
+                        pc1.setTenPhong(phongThiRaw.get(i));
+                        allGT.add(pc1);
+
+                        CanBoCoiThi gt2 = selectedGiamThi.get(2 * i + 1);
+                        PhanCongChiTiet pc2 = new PhanCongChiTiet();
+                        pc2.setRole(PhanCongChiTiet.ROLE_GIAMTHI2);
+                        pc2.setViTriTrongPhong(2);
+                        pc2.setMaGV(gt2.getMaGV());
+                        pc2.setHoTen(gt2.getHoTen());
+                        pc2.setTenPhong(phongThiRaw.get(i));
+                        allGT.add(pc2);
+                    }
+
+                    List<PhanCongChiTiet> allGS = new ArrayList<>();
+                    if (!selectedGiamSat.isEmpty()) {
+                        int soGiamSat = selectedGiamSat.size();
+                        if (soGiamSat <= n) {
+                            int phongMoi = n / soGiamSat;
+                            int phongDu2 = n % soGiamSat;
+                            int idxPhong = 0;
+                            for (int g = 0; g < soGiamSat; g++) {
+                                CanBoCoiThi gs = selectedGiamSat.get(g);
+                                int soPhongCho = phongMoi + (g < phongDu2 ? 1 : 0);
+                                int fromPhong = Math.min(idxPhong, n - 1);
+                                int toPhong;
+                                if (soPhongCho <= 0) {
+                                    toPhong = n - 1;
+                                    fromPhong = n - 1;
+                                } else {
+                                    toPhong = Math.min(idxPhong + soPhongCho - 1, n - 1);
+                                }
+                                String rangeText = (fromPhong == toPhong)
+                                        ? phongThiRaw.get(fromPhong)
+                                        : "Từ " + phongThiRaw.get(fromPhong) + " đến " + phongThiRaw.get(toPhong);
+                                PhanCongChiTiet pcgs = new PhanCongChiTiet();
+                                pcgs.setRole(PhanCongChiTiet.ROLE_GIAMSAT);
+                                pcgs.setViTriTrongPhong(3 + g);
+                                pcgs.setRangeText(rangeText);
+                                pcgs.setMaGV(gs.getMaGV());
+                                pcgs.setHoTen(gs.getHoTen());
+                                pcgs.setTenPhong(phongThiRaw.get(fromPhong));
+                                allGS.add(pcgs);
+                                idxPhong = toPhong + 1;
+                            }
+                        } else {
+                            // quá nhiều giám sát so với phòng -> round-robin mỗi giám sát 1 phòng
+                            for (int g = 0; g < soGiamSat; g++) {
+                                CanBoCoiThi gs = selectedGiamSat.get(g);
+                                int roomIdx = g % n;
+                                String roomName = phongThiRaw.get(roomIdx);
+                                PhanCongChiTiet pcgs = new PhanCongChiTiet();
+                                pcgs.setRole(PhanCongChiTiet.ROLE_GIAMSAT);
+                                pcgs.setViTriTrongPhong(3 + g);
+                                pcgs.setRangeText(roomName);
+                                pcgs.setMaGV(gs.getMaGV());
+                                pcgs.setHoTen(gs.getHoTen());
+                                pcgs.setTenPhong(roomName);
+                                allGS.add(pcgs);
+                            }
+                        }
+                    }
+
+                    assignedGiamThi = allGT;
+                    assignedGiamSat = allGS;
+                    ok = true;
                 }
+
+                if (!ok) {
+                    return errorResult("Không thể tìm phân công thỏa ràng buộc lịch sử sau nhiều lần thử. Vui lòng tăng số cán bộ hoặc thay đổi tham số.");
+                }
+
+                // gán kết quả cuối cùng vào biến để tiếp tục phần ghi DB và trả về
+                List<PhanCongChiTiet> allChiTiet = assignedGiamThi;
+                List<PhanCongChiTiet> giamSatChiTiet = assignedGiamSat;
+
+                System.out.println("[BO] Giám thị: " + assignedGiamThi.size() + ", Giám sát: " + assignedGiamSat.size());
+
+                // Gán kết quả để tiếp tục phần ghi DB chung phía dưới
+                finalAllChiTiet = allChiTiet;
+                finalGiamSatChiTiet = giamSatChiTiet;
             }
+
+            // tenPhongList đã được khai báo trước đó
 
             // ====== BƯỚC 7: GHI DB ======
             System.out.println("[BO] Logic thành công, lưu vào DB...");
@@ -227,7 +451,7 @@ public class PhanCongBO {
                 danhSachPhongPC.add(ptpc);
             }
 
-            for (PhanCongChiTiet pc : allChiTiet) {
+            for (PhanCongChiTiet pc : finalAllChiTiet) {
                 pc.setDotPhanCongId(dotId);
                 int idx = tenPhongList.indexOf(pc.getTenPhong());
                 if (idx >= 0)
@@ -236,7 +460,7 @@ public class PhanCongBO {
                 if (cbId != null)
                     pc.setCanBoId(cbId);
             }
-            for (PhanCongChiTiet pc : giamSatChiTiet) {
+            for (PhanCongChiTiet pc : finalGiamSatChiTiet) {
                 pc.setDotPhanCongId(dotId);
                 int idx = tenPhongList.indexOf(pc.getTenPhong());
                 if (idx >= 0)
@@ -246,9 +470,50 @@ public class PhanCongBO {
                     pc.setCanBoId(cbId);
             }
 
-            List<PhanCongChiTiet> allToSave = new ArrayList<>(allChiTiet);
-            allToSave.addAll(giamSatChiTiet);
+            List<PhanCongChiTiet> allToSave = new ArrayList<>(finalAllChiTiet);
+            allToSave.addAll(finalGiamSatChiTiet);
             chiTietDAO.insertBatch(allToSave);
+
+            // --- Lưu lịch sử vào các bảng mới để dùng cho lần phân công sau ---
+            try {
+                // 1) lich_su_cap_phong: ghép cặp theo phòng (2 giám thị mỗi phòng)
+                List<Map<String, String>> pairs = new ArrayList<>();
+                Map<String, List<PhanCongChiTiet>> byRoom = new LinkedHashMap<>();
+                for (PhanCongChiTiet pc : finalAllChiTiet) {
+                    byRoom.computeIfAbsent(pc.getTenPhong(), k -> new ArrayList<>()).add(pc);
+                }
+                for (Map.Entry<String, List<PhanCongChiTiet>> e : byRoom.entrySet()) {
+                    String room = e.getKey();
+                    List<PhanCongChiTiet> lst = e.getValue();
+                    if (lst.size() >= 2) {
+                        String a = lst.get(0).getMaGV();
+                        String b = lst.get(1).getMaGV();
+                        Map<String, String> p = new LinkedHashMap<>();
+                        p.put("can_bo_1_ma", a);
+                        p.put("can_bo_2_ma", b);
+                        p.put("phong_thi_ten", room);
+                        pairs.add(p);
+                    }
+                }
+                lichSuCapPhongDAO.insertBatch(dotId, pairs);
+
+                // 2) lich_su_phong_thi: mọi cán bộ -> phòng
+                List<Map<String, String>> rows = new ArrayList<>();
+                for (PhanCongChiTiet pc : allToSave) {
+                    Map<String, String> r = new LinkedHashMap<>();
+                    r.put("can_bo_ma", pc.getMaGV());
+                    r.put("ten_phong", pc.getTenPhong());
+                    rows.add(r);
+                }
+                lichSuPhongThiDAO.insertBatch(dotId, rows);
+
+                // 3) lich_su_giam_sat: danh sách mã giám sát
+                List<String> gss = new ArrayList<>();
+                for (PhanCongChiTiet pc : finalGiamSatChiTiet) gss.add(pc.getMaGV());
+                lichSuGiamSatDAO.insertBatch(dotId, gss);
+            } catch (Exception ex) {
+                System.err.println("[BO] Cảnh báo: Không thể lưu lịch sử phân công: " + ex.getMessage());
+            }
 
             // ====== BƯỚC 9: TẠO RESPONSE MAP ======
             Map<String, Object> response = new LinkedHashMap<>();
@@ -258,13 +523,13 @@ public class PhanCongBO {
             response.put("tenDot", tenDot);
             response.put("tongCanBo", m);
             response.put("tongGiamThi", soGiamThiCanThiet);
-            response.put("tongGiamSat", giamSatList.size());
+            response.put("tongGiamSat", finalGiamSatChiTiet.size());
             response.put("tongPhong", n);
 
             // Danh sách phân công (JSON-friendly)
             List<Map<String, Object>> phanCongList = new ArrayList<>();
             int stt = 1;
-            for (PhanCongChiTiet pc : allChiTiet) {
+            for (PhanCongChiTiet pc : finalAllChiTiet) {
                 Map<String, Object> item = new LinkedHashMap<>();
                 item.put("stt", stt++);
                 item.put("maGV", pc.getMaGV());
@@ -278,7 +543,7 @@ public class PhanCongBO {
             // Danh sách giám sát
             List<Map<String, Object>> giamSatListResult = new ArrayList<>();
             stt = 1;
-            for (PhanCongChiTiet pc : giamSatChiTiet) {
+            for (PhanCongChiTiet pc : finalGiamSatChiTiet) {
                 Map<String, Object> item = new LinkedHashMap<>();
                 item.put("stt", stt++);
                 item.put("maGV", pc.getMaGV());
@@ -287,8 +552,6 @@ public class PhanCongBO {
                 giamSatListResult.add(item);
             }
             response.put("giamSat", giamSatListResult);
-
-            // Không gửi file Excel — client tự lưu dựa trên dữ liệu JSON
 
             System.out.println("[BO] Hoàn thành!");
             return response;
@@ -326,5 +589,75 @@ public class PhanCongBO {
 
     private String generateMaDot() {
         return "DOT_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+    }
+
+    private String makePairKey(String a, String b) {
+        if (a == null) a = "";
+        if (b == null) b = "";
+        return a.compareTo(b) <= 0 ? (a + "#" + b) : (b + "#" + a);
+    }
+
+    private PrevHistory loadPrevHistory(long dotId) throws SQLException {
+        PrevHistory h = new PrevHistory();
+        // Thử nạp từ các bảng lịch sử mới (nếu có)
+        try {
+            var pairs = lichSuCapPhongDAO.findByDotId(dotId);
+            if (pairs != null && !pairs.isEmpty()) {
+                for (var row : pairs) {
+                    String a = row.get("can_bo_1_ma");
+                    String b = row.get("can_bo_2_ma");
+                    String room = row.get("phong_thi_ten");
+                    h.paired.add(makePairKey(a, b));
+                    if (a != null) h.prevRooms.computeIfAbsent(a, k -> new HashSet<>()).add(room);
+                    if (b != null) h.prevRooms.computeIfAbsent(b, k -> new HashSet<>()).add(room);
+                }
+            }
+
+            var rooms = lichSuPhongThiDAO.findByDotId(dotId);
+            if (rooms != null && !rooms.isEmpty()) {
+                for (var r : rooms) {
+                    String ma = r.get("can_bo_ma");
+                    String ten = r.get("ten_phong");
+                    if (ma != null) h.prevRooms.computeIfAbsent(ma, k -> new HashSet<>()).add(ten);
+                }
+            }
+
+            var gss = lichSuGiamSatDAO.findByDotId(dotId);
+            if (gss != null && !gss.isEmpty()) {
+                for (String ma : gss) {
+                    if (ma != null) h.prevGiamSat.add(ma);
+                }
+            }
+
+            // Nếu không có bản ghi lịch sử trong các bảng mới, fallback sang đọc từ phan_cong_chi_tiet
+            if ((pairs == null || pairs.isEmpty()) && (rooms == null || rooms.isEmpty()) && (gss == null || gss.isEmpty())) {
+                // giám thị (ghép cặp theo phòng)
+                List<PhanCongChiTiet> gts = chiTietDAO.findGiamThiByDotId(dotId);
+                Map<String, List<PhanCongChiTiet>> byRoom = new LinkedHashMap<>();
+                for (PhanCongChiTiet pc : gts) {
+                    String room = pc.getTenPhong();
+                    byRoom.computeIfAbsent(room, k -> new ArrayList<>()).add(pc);
+                    h.prevRooms.computeIfAbsent(pc.getMaGV(), k -> new HashSet<>()).add(room);
+                }
+                for (List<PhanCongChiTiet> lst : byRoom.values()) {
+                    for (int i = 0; i + 1 < lst.size(); i += 2) {
+                        String a = lst.get(i).getMaGV();
+                        String b = lst.get(i + 1).getMaGV();
+                        h.paired.add(makePairKey(a, b));
+                    }
+                }
+
+                List<PhanCongChiTiet> gss2 = chiTietDAO.findGiamSatByDotId(dotId);
+                for (PhanCongChiTiet pc : gss2) {
+                    h.prevGiamSat.add(pc.getMaGV());
+                    h.prevRooms.computeIfAbsent(pc.getMaGV(), k -> new HashSet<>()).add(pc.getTenPhong());
+                }
+            }
+        } catch (SQLException ex) {
+            // nếu có lỗi DB, ném lên để caller xử lý
+            throw ex;
+        }
+
+        return h;
     }
 }

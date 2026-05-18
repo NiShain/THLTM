@@ -1,34 +1,34 @@
 # Plan triển khai bài thi phân công cán bộ coi thi
 
-Mục tiêu của bài này là xây dựng một ứng dụng Java client-server trong project `ThiTHLTM` để đọc danh sách cán bộ coi thi từ file Excel, nhận số giám thị `m` và số phòng thi `n`, phân công ngẫu nhiên không lặp, bảo đảm mỗi phòng thi luôn có đúng 2 giám thị, phân bổ cán bộ còn dư làm giám sát hành lang, lưu dữ liệu vào MySQL, và xuất file Excel trả về theo đúng định dạng đề bài.
+Mục tiêu của bài này là xây dựng một ứng dụng Java client-server trong project `ThiTHLTM` để đọc danh sách cán bộ coi thi từ file Excel, nhận số giám thị `m`, số phòng thi `n` và thông tin "đợt thi". Server chịu trách nhiệm phân công ngẫu nhiên không lặp, bảo đảm mỗi phòng thi luôn có đúng 2 giám thị, phân bổ cán bộ còn dư làm giám sát hành lang, lưu dữ liệu vào MySQL. Client nhận kết quả trả về, hiển thị lên giao diện và xuất các file Excel vào thư mục theo đúng định dạng đề bài.
 
 ## 1. Phạm vi bắt buộc
 
 - Client phải đọc dữ liệu từ file `Danh sach can bo coi thi.xlsx`.
 - Người dùng nhập `m` và `n` trên client.
-- Client gửi dữ liệu cần thiết sang server.
-- Server nhận dữ liệu, lưu vào database, thực hiện thuật toán phân công ngẫu nhiên không trùng, rồi tạo file Excel kết quả. Mỗi phòng thi phải có đúng 2 giám thị. Nếu số cán bộ còn dư sau khi phân 2 giám thị cho mỗi phòng, phần dư đó sẽ được chuyển thành cán bộ giám sát hành lang và chia đều cho tất cả các phòng thi.
-- File Excel trả về phải có phần tiêu đề như hình mẫu: `Cộng hòa xã hội chủ nghĩa Việt Nam` và `Độc Lập - Tự Do - Hạnh Phúc`.
+- Client gửi dữ liệu cần thiết sang server (bao gồm thông tin tên "đợt thi").
+- Server nhận dữ liệu, lưu vào database, thực hiện thuật toán phân công ngẫu nhiên không trùng. Mỗi phòng thi phải có đúng 2 giám thị. Nếu số cán bộ còn dư sau khi phân 2 giám thị cho mỗi phòng, phần dư đó sẽ được chuyển thành cán bộ giám sát hành lang và chia đều cho tất cả các phòng thi. Server sau đó trả kết quả phân công về cho client.
+- Client nhận kết quả, hiển thị danh sách cán bộ coi thi và giám sát hành lang lên giao diện. Sau đó client tạo thư mục với tên "đợt thi" (nếu không điền tên đợt thi thì tự lấy ngày giờ hiện tại đặt tên folder) và tạo 2 file Excel kết quả lưu vào thư mục đó. Các file Excel do client xuất phải có phần tiêu đề như hình mẫu: `Cộng hòa xã hội chủ nghĩa Việt Nam` và `Độc Lập - Tự Do - Hạnh Phúc`.
 - Nếu số cán bộ cần xuất vượt quá giới hạn, phải tách sang nhiều sheet; mỗi sheet tối đa `24` cán bộ.
 
 ## 2. Hướng thiết kế để agent có thể code ngay
 
 ### 2.1. Kiến trúc
 
-- Client chỉ làm các việc sau: đọc Excel, lấy danh sách cán bộ hợp lệ, nhận đầu vào `m` và `n`, gửi payload sang server, nhận file Excel kết quả.
-- Server là nơi xử lý chính: kiểm tra dữ liệu, lưu vào MySQL, sinh phân công, xuất Excel, trả file cho client.
+- Client thực hiện các việc sau: đọc Excel, lấy danh sách cán bộ hợp lệ, nhận đầu vào `m`, `n` cùng "đợt thi", gửi payload sang server. Sau đó nhận kết quả phân công, hiển thị lên giao diện, tạo thư mục theo tên đợt thi (hoặc ngày giờ hiện tại) và xuất 2 file Excel lưu vào thư mục đó.
+- Server là nơi xử lý chính: kiểm tra dữ liệu, lưu vào MySQL, sinh phân công, và trả kết quả phân công (dữ liệu thô) về cho client.
 - Không để client tự sắp xếp logic cuối cùng; mọi thuật toán bốc ngẫu nhiên và chia phòng phải nằm ở server để dễ kiểm soát.
 
 ### 2.2. Luồng xử lý
 
 1. Client mở file Excel nguồn và trích các cột cần dùng.
 2. Client yêu cầu người dùng nhập `m` và `n`.
-3. Client gửi danh sách cán bộ cùng thông tin phiên làm việc sang server.
+3. Client gửi danh sách cán bộ cùng thông tin "đợt thi" (phiên làm việc) sang server.
 4. Server tạo một đợt phân công mới trong database.
 5. Server shuffle danh sách cán bộ bằng bộ sinh ngẫu nhiên chuẩn, sau đó lấy đúng số lượng cần dùng, không lặp.
 6. Server chia cán bộ vào `n` phòng thi theo quy tắc cố định: mỗi phòng thi nhận đúng 2 giám thị. Phần cán bộ còn lại được gán làm giám sát hành lang và phân đều cho tất cả các phòng thi.
-7. Server sinh file Excel kết quả, mỗi sheet không quá `24` cán bộ.
-8. Server trả file cho client để người dùng lưu hoặc tải về.
+7. Server trả kết quả phân công về cho client.
+8. Client nhận kết quả, hiển thị phân công lên giao diện. Tiếp theo, tạo thư mục có tên "đợt thi" (nếu trống sẽ lấy ngày giờ hiện tại) và sinh 2 file Excel kết quả lưu vào đó, mỗi sheet không quá `24` cán bộ.
 
 ## 3. Database cần lưu gì và lưu như thế nào
 
@@ -80,8 +80,8 @@ Mục tiêu của bài này là xây dựng một ứng dụng Java client-serve
 
 ## 6. Gợi ý cấu trúc mã nguồn cho agent
 
-- `client`: đọc Excel, nhập tham số, gọi server.
-- `server`: nhận request, validate, lưu DB, phân công, sinh Excel.
+- `client`: đọc Excel, nhập tham số, gửi cho server, nhận kết quả phân công, hiển thị kết quả, tạo thư mục và xuất file Excel.
+- `server`: nhận request, validate, lưu DB, phân công, trả dữ liệu phân công.
 - `model`: DTO và entity cho cán bộ, phòng thi, đợt phân công.
 - `dao`: thao tác MySQL.
 - `util`: đọc Excel, ghi Excel, sinh ngẫu nhiên, kiểm tra dữ liệu.
@@ -93,7 +93,7 @@ Mục tiêu của bài này là xây dựng một ứng dụng Java client-serve
 3. Viết phần đọc Excel ở client.
 4. Viết socket hoặc cơ chế giao tiếp client-server.
 5. Viết thuật toán phân công ngẫu nhiên ở server.
-6. Viết phần xuất Excel nhiều sheet.
+6. Viết phần hiển thị kết quả và xuất Excel nhiều sheet ở client.
 7. Kiểm tra các case lỗi và dữ liệu biên.
 
 ## 8. Điều kiện hoàn thành
@@ -102,7 +102,7 @@ Mục tiêu của bài này là xây dựng một ứng dụng Java client-serve
 - Server lưu được dữ liệu vào MySQL.
 - Phân công không bị lặp cán bộ trong cùng một đợt.
 - Mỗi phòng thi luôn có đúng 2 giám thị và phần cán bộ dư được chia đều làm giám sát hành lang.
-- File Excel trả về có đúng tiêu đề, đúng bố cục, và tách sheet khi cần.
+- File Excel do client tạo ra có đúng tiêu đề, đúng bố cục, và tách sheet khi cần, nằm trong đúng thư mục được yêu cầu.
 - Có xử lý lỗi cho các trường hợp nhập sai `m`, `n`, hoặc file Excel không hợp lệ.
 
 ## 9. Định dạng file Excel kết quả (chi tiết)
