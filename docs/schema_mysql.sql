@@ -100,3 +100,43 @@ CREATE TABLE phan_cong_chi_tiet (
     FOREIGN KEY (can_bo_id) REFERENCES can_bo_coi_thi(id)
     ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ===== BẢNG LỊCH SỬ (để nhớ những ai đã chung phòng/vai trò trước đó) =====
+
+CREATE TABLE lich_su_cap_phong (
+  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  dot_id BIGINT UNSIGNED NOT NULL,
+  can_bo_1_ma VARCHAR(50) NOT NULL,
+  can_bo_2_ma VARCHAR(50) NOT NULL,
+  phong_thi_ten VARCHAR(100),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY unique_pair (dot_id, can_bo_1_ma, can_bo_2_ma),
+  FOREIGN KEY (dot_id) REFERENCES dot_phan_cong(id) ON DELETE CASCADE,
+  INDEX idx_dot_id (dot_id),
+  INDEX idx_can_bo_1 (can_bo_1_ma),
+  INDEX idx_can_bo_2 (can_bo_2_ma)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE lich_su_phong_thi (
+  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  dot_id BIGINT UNSIGNED NOT NULL,
+  can_bo_ma VARCHAR(50) NOT NULL,
+  ten_phong VARCHAR(100) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY unique_can_bo_phong (dot_id, can_bo_ma, ten_phong),
+  FOREIGN KEY (dot_id) REFERENCES dot_phan_cong(id) ON DELETE CASCADE,
+  INDEX idx_dot_id (dot_id),
+  INDEX idx_can_bo_ma (can_bo_ma),
+  INDEX idx_ten_phong (ten_phong)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE lich_su_giam_sat (
+  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  dot_id BIGINT UNSIGNED NOT NULL,
+  can_bo_ma VARCHAR(50) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY unique_can_bo_dot (dot_id, can_bo_ma),
+  FOREIGN KEY (dot_id) REFERENCES dot_phan_cong(id) ON DELETE CASCADE,
+  INDEX idx_dot_id (dot_id),
+  INDEX idx_can_bo_ma (can_bo_ma)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
